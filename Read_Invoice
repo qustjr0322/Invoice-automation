@@ -1,0 +1,179 @@
+import streamlit as st
+from openai import OpenAI
+from dotenv import load_dotenv
+import os
+import json
+import gspread
+from pypdf import PdfReader
+
+load_dotenv()
+
+worksheet = None
+# --- 1. 구글 시트 연결 설정 (OAuth 방식) ---
+try:
+    gc = gspread.oauth(
+        credentials_filename='client_secret.json',
+        authorized_user_filename='authorized_user.json'
+    )
+    sheet_url = 'https://docs.google.com/spreadsheets/d/1j_uveQsax4_Lz_aoyhViSJk769W7lkZVyUZ107-9wcw/edit'
+    worksheet = gc.open_by_url(sheet_url).sheet1
+except Exception as e:
+    st.error(f"구글 시트 연동 오류: {e}")
+
+# --- (0) 사이드바 설정 ---
+with st.sidebar:
+    openai_api_key = os.getenv('OPENAI_API_KEY') 
+    st.markdown("---")
+    uploaded_file = st.file_uploader("인보이스(PDF)를 업로드하세요", type=["pdf"])
+
+st.title("💬 인보이스 자동 추출 & 시트 기입 봇")
+
+if "messages" not in st.session_state:
+    st.session_state["messages"] = [
+        {"role": "assistant", "content": "PDF 업로드 후 '정보 추출해서 시트에 넣어줘'라고 입력해보세요!"}
+    ]
+
+for msg in st.session_state.messages:
+    st.chat_message(msg["role"]).write(msg["content"])
+
+def get_pdf_text(file):
+    pdf_reader = PdfReader(file)
+    text = ""
+    for page in pdf_reader.pages:
+        extracted = page.extract_text()
+        if extracted:
+            text += extracted + "\n"
+    return text
+
+if prompt := st.chat_input():
+    if not openai_api_key:
+        st.info("Please add your OpenAI API key to continue.")
+        st.stop()
+
+    client = OpenAI(api_key=openai_api_key)
+    
+    st.session_state.messages.append({"role": "user", "content": prompt}) 
+    st.chat_message("user").write(prompt) 
+    
+    messages_for_api = st.session_state.messages.copy()
+    
+    if uploaded_file is not None:
+        pdf_text = get_pdf_text(uploaded_file)
+        
+        # 🎯 품목/서비스 키워드(comment_keyword)도 함께 추출하도록 프롬프트 보강
+        system_instruction = """
+당신은 인보이스 분석 전문가입니다.
+주어진 텍스트에서 정보를 추출하여 반드시 아래와 같은 JSON 형식으로만 응답하세요. 
+
+[⚠️ 지시사항]
+1. 'supplier'에는 돈을 받는 공급자(판매자)의 이름만 가져오세요. ('발레오' 관련 이름 제외)
+2. 'comment_keyword'에는 청구된 서비스나 품목 항목의 핵심 단어를 영어 또는 한글로 가져오세요. (예: Motorbill, WEBLC, Network, Internet 등)
+
+{
+  "supplier": "공급자 업체명",
+  "comment_keyword": "청구 서비스/품목 키워드",
+  "invoice number": "승인 번호 (납부번호)",
+  "date": "발행 날짜",
+  "amount": "금액 (숫자 및 화폐단위)"
+}
+"""
+        messages_for_api = [{"role": "system", "content": system_instruction}] + st.session_state.messages[:-1]
+        combined_content = f"--- [PDF 문서 내용] ---\n{pdf_text}\n\n사용자 요청: {prompt}"
+        messages_for_api.append({"role": "user", "content": combined_content})
+
+    # AI 응답 호출
+    response = client.chat.completions.create(
+        model="gpt-4o", 
+        response_format={ "type": "json_object" },
+        messages=messages_for_api
+    ) 
+    msg = response.choices[0].message.content
+    
+    # 🎯 다중 조건(업체명 + Request Comment) 매칭 로직
+    # 🎯 다중 조건(업체명 + Request Comment) 매칭 및 예쁜 화면 출력 로직
+    try:
+        data = json.loads(msg) 
+        
+        supplier = data.get('supplier', '-').strip()
+        comment_kw = data.get('comment_keyword', '-').strip()
+        invoice_no = data.get('invoice number', '-').strip()
+        date = data.get('date', '-').strip()
+        amount = data.get('amount', '-').strip()
+        
+        # 1️⃣ [시트 연동 여부와 관계없이 무조건 먼저 만들어지는 예쁜 결과 카드]
+        display_msg = f"""### 📄 인보이스 정보 추출 완료!
+* **업체명**: {supplier}
+* **품목/서비스**: {comment_kw}
+* **승인 번호**: {invoice_no}
+* **발행 날짜**: {date}
+* **금액**: {amount}
+---
+"""
+
+        # 2️⃣ [구글 시트 연동 상태일 때만 시트 기입 시도]
+        if worksheet is not None:
+            try:
+                all_rows = worksheet.get_all_values()
+                default_template = list(all_rows[1]) if len(all_rows) > 1 else [""] * 14
+                if len(default_template) < 14:
+                    default_template.extend([""] * (14 - len(default_template)))
+
+                target_row_idx = None
+                matching_supplier_template = None
+
+                for idx, row in enumerate(all_rows, start=1):
+                    if idx == 1: continue
+                    sheet_company = row[0].strip() if len(row) > 0 else ""
+                    sheet_comment = row[5].strip().lower() if len(row) > 5 else ""
+                    existing_inv_no = row[7].strip() if len(row) > 7 else ""
+                    existing_amount = row[11].strip() if len(row) > 11 else ""
+
+                    if supplier and sheet_company and (supplier in sheet_company or sheet_company in supplier):
+                        if comment_kw and sheet_comment and (comment_kw.lower() in sheet_comment or sheet_comment in comment_kw.lower()):
+                            matching_supplier_template = list(row)
+                            if not existing_inv_no and not existing_amount:
+                                target_row_idx = idx
+                                break
+
+                if not target_row_idx:
+                    for idx, row in enumerate(all_rows, start=1):
+                        if idx == 1: continue
+                        sheet_company = row[0].strip() if len(row) > 0 else ""
+                        if not sheet_company:
+                            target_row_idx = idx
+                            break
+
+                # 기존 행에 업데이트
+                if target_row_idx:
+                    worksheet.update_cell(target_row_idx, 1, supplier)
+                    worksheet.update_cell(target_row_idx, 8, invoice_no)
+                    worksheet.update_cell(target_row_idx, 9, date)
+                    worksheet.update_cell(target_row_idx, 12, amount)
+                    display_msg += f"✅ **구글 시트 {target_row_idx}번째 행에 자동 기입되었습니다!**"
+
+                # 새 행으로 추가
+                else:
+                    base_row = matching_supplier_template if matching_supplier_template else default_template
+                    new_row = base_row.copy()
+                    if len(new_row) < 14: new_row.extend([""] * (14 - len(new_row)))
+                    
+                    new_row[0] = supplier
+                    new_row[7] = invoice_no
+                    new_row[8] = date
+                    new_row[11] = amount
+                    
+                    worksheet.append_row(new_row)
+                    display_msg += f"✅ **구글 시트에 [새로운 행]으로 추가되었습니다!**"
+
+            except Exception as sheet_err:
+                # 시트 오류가 나도 추출 결과는 상단에 예쁘게 유지됩니다.
+                display_msg += f"⚠️ **구글 시트 기입 실패**: `{sheet_err}`\n*(추출된 결과는 상단에서 확인하실 수 있습니다.)*"
+        else:
+            # 구글 시트 미연결 시 안내 문구만 추가
+            display_msg += "ℹ️ *구글 시트가 연동되어 있지 않아 데이터 추출만 진행되었습니다.*"
+
+    except Exception as e:
+        display_msg = f"❌ AI 응답 해석 오류: `{e}`\n\nAI 원본 응답:\n{msg}"
+
+    st.session_state.messages.append({"role": "assistant", "content": display_msg}) 
+    st.chat_message("assistant").write(display_msg)
