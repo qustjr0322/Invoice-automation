@@ -14,22 +14,6 @@ import glob
 
 load_dotenv()
 
-# --- 0. 임시 다운로드 폴더 자동 정리 함수 ---
-def cleanup_temp_downloads(folder_path="temp_downloads"):
-    if os.path.exists(folder_path):
-        # temp_downloads 폴더 내의 모든 파일 조회
-        files = glob.glob(os.path.join(folder_path, "*"))
-        for f in files:
-            try:
-                # 사용 중이 아닌 파일만 삭제
-                if os.path.isfile(f):
-                    os.remove(f)
-            except Exception as e:
-                pass # 열려있거나 사용 중인 파일은 건너뜀
-
-# 앱 실행 시 자동 청소 실행
-cleanup_temp_downloads()
-
 # --- 1. 구글 시트 연결 설정 ---
 worksheet = None
 try:
@@ -238,11 +222,18 @@ if prompt := st.chat_input():
             supplier = data.get('supplier', '-').strip()
             comment_kw = data.get('comment_keyword', '-').strip()
             invoice_no = data.get('invoice number', '-').strip()
-            date = data.get('date', '-').strip()
+            raw_date = data.get('date', '-').strip()
             amount = data.get('amount', '-').strip()
             gl_account = data.get('gl_account', '').strip()
             cost_center = data.get('cost_center', '').strip()
             internal_order = data.get('internal_order', '').strip()
+
+            import re
+            date_digits = re.sub(r'[^0-9]', '', raw_date) # 숫자만 추출
+            if len(date_digits) == 8:
+                date = f"{date_digits[:4]}-{date_digits[4:6]}-{date_digits[6:]}" # YYYY-MM-DD 형식으로 결합
+            else:
+                date = raw_date # 8자리가 아닐 경우 기존 값 유지
             
             # 🎯 추출 결과 요약 메시지 복원
             display_msg = f"""### 📄 인보이스 정보 추출 완료!
@@ -262,50 +253,66 @@ if prompt := st.chat_input():
                     matching_supplier_template = None
                     supplier_code = ""
                     
-                    # AI 추출 품목 단어를 초기 코멘트로 설정
                     final_comment_kw = comment_kw 
+                    exact_match_found = False
 
-                    # 🎯 동일 업체 내에서 품목 키워드 교차 검증 및 정해진 표준 comment_kw 가져오기
+                    # AI가 추출한 품목에서 알파벳/숫자 대표 키워드만 추출 (예: 'WEBLC 사용료' -> 'WEBLC')
+                    import re
+                    extracted_words = re.findall(r'[A-Za-z0-9]+', comment_kw)
+
                     for idx, row in enumerate(all_rows, start=1):
                         if idx == 1: continue # 헤더 스킵
                         
                         sheet_company_name = row[0].strip() if len(row) > 0 else ""     # A열: 업체 이름
-                        sheet_comment = row[5].strip() if len(row) > 5 else ""          # F열: 시트에 등록된 정해진 comment_kw
+                        sheet_comment = row[5].strip() if len(row) > 5 else ""          # F열: 정해진 comment_kw
                         existing_inv_no = row[7].strip() if len(row) > 7 else ""        # H열: invoice_no
                         existing_amount = row[10].strip() if len(row) > 10 else ""      # K열: Amount
 
-                        # 1단계: 업체명이 일치하는지 확인
+                        # 1. 업체명이 일치하는 경우
                         if supplier and sheet_company_name and (supplier in sheet_company_name or sheet_company_name in supplier):
                             
-                            # 2단계: AI 추출 품목 단어(comment_kw)가 시트의 F열 정해진 comment_kw에 포함되는지 확인
-                            kw_match = False
-                            if comment_kw and sheet_comment:
-                                # 예: AI가 추출한 'WEBLC'가 시트의 'WEBLC program using fee'에 포함되는지 체크
-                                if comment_kw.lower() in sheet_comment.lower() or sheet_comment.lower() in comment_kw.lower():
-                                    kw_match = True
-
-                            if kw_match or matching_supplier_template is None:
+                            # 기본 업체 템플릿 정보 저장 (품목 매칭 안 될 경우 대비용)
+                            if not exact_match_found:
                                 matching_supplier_template = list(row)
-                                
-                                # 🎯 시트에 이미 등록된 정해진 표준 comment_kw(영문)로 치환!
-                                if sheet_comment: 
-                                    final_comment_kw = sheet_comment
-                                    
                                 if len(row) > 6 and row[6].strip(): supplier_code = row[6].strip()
                                 if len(row) > 9 and row[9].strip(): gl_account = row[9].strip()
                                 if len(row) > 11 and row[11].strip(): cost_center = row[11].strip()
                                 if len(row) > 12 and row[12].strip(): internal_order = row[12].strip()
 
-                            # 키워드까지 완벽히 일치하고, 빈 행인 경우 해당 행에 업데이트
-                            if kw_match and not existing_inv_no and not existing_amount:
-                                target_row_idx = idx
-                                break
+                            # 2. 품목 키워드 매칭 체크 (영문/숫자 단어 기준)
+                            if sheet_comment:
+                                is_kw_matched = False
 
-                    # 세션 데이터 저장 (시트에 정해진 표준 comment_kw 적용)
+                                # ① 영문/숫자 단어(WEBLC, MOTORBILL 등)가 시트 코멘트에 포함되는지 확인
+                                for word in extracted_words:
+                                    if len(word) >= 2 and word.lower() in sheet_comment.lower():
+                                        is_kw_matched = True
+                                        break
+                                
+                                # ② 단어 추출이 안 된 경우 기존 상호 포함 비교
+                                if not is_kw_matched and comment_kw and (comment_kw.lower() in sheet_comment.lower() or sheet_comment.lower() in comment_kw.lower()):
+                                    is_kw_matched = True
+
+                                # 매칭 성공 시 정해진 템플릿 영문 코멘트로 치환!
+                                if is_kw_matched:
+                                    exact_match_found = True
+                                    final_comment_kw = sheet_comment # 🎯 'WEBLC program using fee'로 치환!
+                                    
+                                    if len(row) > 6 and row[6].strip(): supplier_code = row[6].strip()
+                                    if len(row) > 9 and row[9].strip(): gl_account = row[9].strip()
+                                    if len(row) > 11 and row[11].strip(): cost_center = row[11].strip()
+                                    if len(row) > 12 and row[12].strip(): internal_order = row[12].strip()
+
+                                    # 비어있는 행이 있다면 해당 행에 직접 업데이트
+                                    if not existing_inv_no and not existing_amount:
+                                        target_row_idx = idx
+                                        break
+
+                    # 세션 데이터 저장 (최종 치환된 영문 코멘트로 저장)
                     st.session_state["latest_invoice_data"] = {
                         "supplier": supplier,
                         "supplier_code": supplier_code,
-                        "comment_kw": final_comment_kw, # 🎯 변환된 표준 코멘트 사용
+                        "comment_kw": final_comment_kw, # 🎯 템플릿 영문 코멘트 사용
                         "invoice_no": invoice_no,
                         "date": date,
                         "GL_Account": gl_account if gl_account else "61402100",
