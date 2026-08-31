@@ -10,8 +10,25 @@ import pyautogui
 import time
 import tempfile
 import pyperclip
+import glob
 
 load_dotenv()
+
+# --- 0. 임시 다운로드 폴더 자동 정리 함수 ---
+def cleanup_temp_downloads(folder_path="temp_downloads"):
+    if os.path.exists(folder_path):
+        # temp_downloads 폴더 내의 모든 파일 조회
+        files = glob.glob(os.path.join(folder_path, "*"))
+        for f in files:
+            try:
+                # 사용 중이 아닌 파일만 삭제
+                if os.path.isfile(f):
+                    os.remove(f)
+            except Exception as e:
+                pass # 열려있거나 사용 중인 파일은 건너뜀
+
+# 앱 실행 시 자동 청소 실행
+cleanup_temp_downloads()
 
 # --- 1. 구글 시트 연결 설정 ---
 worksheet = None
