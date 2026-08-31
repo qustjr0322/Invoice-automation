@@ -144,7 +144,7 @@ st.title("💬 인보이스 자동 추출 & 구매 시스템 등록 봇")
 
 if "messages" not in st.session_state:
     st.session_state["messages"] = [
-        {"role": "assistant", "content": "PDF 업로드 후 '정보 추출해서 시트에 넣어줘'라고 입력해보세요!"}
+        {"role": "assistant", "content": "PDF 업로드 후 '숫자 1 기입 후 엔터!"}
     ]
 
 for msg in st.session_state.messages:
@@ -244,31 +244,51 @@ if prompt := st.chat_input():
                     target_row_idx = None
                     matching_supplier_template = None
                     supplier_code = ""
+                    
+                    # AI 추출 품목 단어를 초기 코멘트로 설정
+                    final_comment_kw = comment_kw 
 
+                    # 🎯 동일 업체 내에서 품목 키워드 교차 검증 및 정해진 표준 comment_kw 가져오기
                     for idx, row in enumerate(all_rows, start=1):
-                        if idx == 1: continue
-                        sheet_company_name = row[0].strip() if len(row) > 0 else ""
-                        sheet_comment = row[5].strip().lower() if len(row) > 5 else ""
-                        existing_inv_no = row[7].strip() if len(row) > 7 else ""
-                        existing_amount = row[10].strip() if len(row) > 10 else ""
+                        if idx == 1: continue # 헤더 스킵
+                        
+                        sheet_company_name = row[0].strip() if len(row) > 0 else ""     # A열: 업체 이름
+                        sheet_comment = row[5].strip() if len(row) > 5 else ""          # F열: 시트에 등록된 정해진 comment_kw
+                        existing_inv_no = row[7].strip() if len(row) > 7 else ""        # H열: invoice_no
+                        existing_amount = row[10].strip() if len(row) > 10 else ""      # K열: Amount
 
+                        # 1단계: 업체명이 일치하는지 확인
                         if supplier and sheet_company_name and (supplier in sheet_company_name or sheet_company_name in supplier):
-                            matching_supplier_template = list(row)
-                            if len(row) > 6 and row[6].strip(): supplier_code = row[6].strip()
-                            if len(row) > 9 and row[9].strip(): gl_account = row[9].strip()
-                            if len(row) > 11 and row[11].strip(): cost_center = row[11].strip()
-                            if len(row) > 12 and row[12].strip(): internal_order = row[12].strip()
+                            
+                            # 2단계: AI 추출 품목 단어(comment_kw)가 시트의 F열 정해진 comment_kw에 포함되는지 확인
+                            kw_match = False
+                            if comment_kw and sheet_comment:
+                                # 예: AI가 추출한 'WEBLC'가 시트의 'WEBLC program using fee'에 포함되는지 체크
+                                if comment_kw.lower() in sheet_comment.lower() or sheet_comment.lower() in comment_kw.lower():
+                                    kw_match = True
 
-                            if comment_kw and sheet_comment and (comment_kw.lower() in sheet_comment or sheet_comment in comment_kw.lower()):
-                                if not existing_inv_no and not existing_amount:
-                                    target_row_idx = idx
-                                    break
+                            if kw_match or matching_supplier_template is None:
+                                matching_supplier_template = list(row)
+                                
+                                # 🎯 시트에 이미 등록된 정해진 표준 comment_kw(영문)로 치환!
+                                if sheet_comment: 
+                                    final_comment_kw = sheet_comment
+                                    
+                                if len(row) > 6 and row[6].strip(): supplier_code = row[6].strip()
+                                if len(row) > 9 and row[9].strip(): gl_account = row[9].strip()
+                                if len(row) > 11 and row[11].strip(): cost_center = row[11].strip()
+                                if len(row) > 12 and row[12].strip(): internal_order = row[12].strip()
 
-                    # 세션 저장
+                            # 키워드까지 완벽히 일치하고, 빈 행인 경우 해당 행에 업데이트
+                            if kw_match and not existing_inv_no and not existing_amount:
+                                target_row_idx = idx
+                                break
+
+                    # 세션 데이터 저장 (시트에 정해진 표준 comment_kw 적용)
                     st.session_state["latest_invoice_data"] = {
                         "supplier": supplier,
                         "supplier_code": supplier_code,
-                        "comment_kw": comment_kw,
+                        "comment_kw": final_comment_kw, # 🎯 변환된 표준 코멘트 사용
                         "invoice_no": invoice_no,
                         "date": date,
                         "GL_Account": gl_account if gl_account else "61402100",
@@ -278,18 +298,37 @@ if prompt := st.chat_input():
                         "pdf_path": saved_pdf_path
                     }
 
-                    # 구글 시트 기입 메시지 추가
+                    # 화면 표시 메시지 업데이트
+                    display_msg = f"""### 📄 인보이스 정보 추출 완료!
+* **업체명**: {supplier}
+* **품목/서비스**: {final_comment_kw}
+* **승인 번호**: {invoice_no}
+* **발행 날짜**: {date}
+* **금액**: {amount}
+---
+"""
+
+                    # 구글 시트 기입 처리
                     if target_row_idx:
                         worksheet.update_cell(target_row_idx, 1, supplier)
+                        worksheet.update_cell(target_row_idx, 6, final_comment_kw) # F열: 정해진 comment_kw
                         if supplier_code: worksheet.update_cell(target_row_idx, 7, supplier_code)
                         worksheet.update_cell(target_row_idx, 8, invoice_no)
                         worksheet.update_cell(target_row_idx, 9, date)
                         worksheet.update_cell(target_row_idx, 11, amount)
-                        display_msg += f"✅ **구글 시트 {target_row_idx}번째 행에 자동 기입되었습니다!**"
+                        display_msg += f"✅ **[{supplier} - {final_comment_kw}] 기존 행({target_row_idx}행)에 표준 코멘트로 기입되었습니다!**"
                     else:
-                        new_row = [supplier, "A13", "Domestic", "Debit note", "IS", comment_kw, supplier_code, invoice_no, date, gl_account if gl_account else "61402100", amount, cost_center if cost_center else "OJ1060", internal_order if internal_order else "131900000441"]
+                        new_row = [
+                            supplier, "A13", "Domestic", "Debit note", "IS", 
+                            final_comment_kw, # F열: 정해진 comment_kw
+                            supplier_code, invoice_no, date, 
+                            gl_account if gl_account else "61402100", 
+                            amount, 
+                            cost_center if cost_center else "OJ1060", 
+                            internal_order if internal_order else "131900000441"
+                        ]
                         worksheet.append_row(new_row)
-                        display_msg += f"✅ **구글 시트에 [새로운 행]으로 추가되었습니다!**"
+                        display_msg += f"✅ **[{supplier} - {final_comment_kw}] 표준 코멘트로 구글 시트에 [신규 행] 추가되었습니다!**"
 
                 except Exception as sheet_err:
                     display_msg += f"\n⚠️ **구글 시트 기입 실패**: `{sheet_err}`"
