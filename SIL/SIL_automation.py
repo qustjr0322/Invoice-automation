@@ -33,14 +33,9 @@ except Exception as e:
 # --- 2. 매크로 자동화 함수 ---
 def run_purchase_macro(supplier, comment_kw, invoice_no, date, GL_Account, amount, cost_center, internal_order, pdf_file_path=None):
     try:
-        def paste_text(text, delay=0.1):
-            pyperclip.copy(str(text))
-            time.sleep(0.05)
-            pyautogui.hotkey('ctrl', 'v')
-            time.sleep(delay)
-
         target_url = "https://financesscportal.appengine.valeo.com/request/new?form=11&detail=false"
         
+        # 크롬 브라우저 실행
         chrome_path = 'C:/Program Files/Google/Chrome/Application/chrome.exe %s'
         try:
             webbrowser.get(chrome_path).open(target_url)
@@ -55,34 +50,34 @@ def run_purchase_macro(supplier, comment_kw, invoice_no, date, GL_Account, amoun
         time.sleep(7)
 
         # 1. BU Code
-        paste_text('a13')
-        pyautogui.press('tab') 
+        pyautogui.write('a13', interval=0.1) 
+        pyautogui.press('tab', presses=1) 
         time.sleep(1.0)
         
         # 2. Overseas/Domestic
-        paste_text('d')
-        pyautogui.press('tab')
+        pyautogui.write('d', interval=0.1) 
+        pyautogui.press('tab', presses=1)
         time.sleep(1.0)
         
         # 3. Type
-        paste_text('d')
-        pyautogui.press('enter')
+        pyautogui.write('d', interval=0.1) 
+        pyautogui.press('enter', presses=1)
         time.sleep(0.2)
-        pyautogui.press('tab')
+        pyautogui.press('tab', presses=1)
         time.sleep(1.0) 
         
         # 4. Category
-        paste_text('IS')
-        pyautogui.press('tab')
+        pyautogui.write('IS', interval=0.1) 
+        pyautogui.press('tab', presses=1)
         time.sleep(1.0)
         
         # 5. Request Comments 
-        paste_text(comment_kw)
-        pyautogui.press('tab') 
+        pyautogui.write(str(comment_kw), interval=0.05)
+        pyautogui.press('tab', presses=1) 
         time.sleep(0.3)
 
         # 6. Supplier Name (업체 코드 기입 후 드롭다운 선택)
-        paste_text(supplier)
+        pyautogui.write(str(supplier), interval=0.05)
         time.sleep(2.0)
         pyautogui.press('down')
         time.sleep(0.2)
@@ -92,42 +87,42 @@ def run_purchase_macro(supplier, comment_kw, invoice_no, date, GL_Account, amoun
         time.sleep(0.3)
 
         # 7. Invoice Number
-        paste_text(invoice_no)
-        pyautogui.press('tab')
+        pyautogui.write(str(invoice_no), interval=0.05)
+        pyautogui.press('tab', presses=1)
         time.sleep(0.3)
 
         # 8. Invoice Date
-        paste_text(date)
+        pyautogui.write(str(date), interval=0.05)
         pyautogui.press('tab', presses=2)
         time.sleep(0.3)
 
         # 9. Cost center 선택
-        paste_text('c')
+        pyautogui.write('c', interval=0.1)
         pyautogui.press('tab', presses=6) 
         time.sleep(0.3)
 
         # 10. G/L Account Number
-        paste_text(GL_Account)
-        pyautogui.press('tab')
+        pyautogui.write(str(GL_Account), interval=0.05)
+        pyautogui.press('tab', presses=1)
         time.sleep(0.3)
 
         # 11. Amount
-        paste_text(amount)
-        pyautogui.press('tab')
+        pyautogui.write(str(amount), interval=0.05)
+        pyautogui.press('tab', presses=1)
         time.sleep(0.3)
 
         # 12. Currency
-        paste_text('KRW')
-        pyautogui.press('tab')
+        pyautogui.write('KRW', interval=0.1)
+        pyautogui.press('tab', presses=1)
         time.sleep(0.3)
 
         # 13. Cost Center 값
-        paste_text(cost_center)
-        pyautogui.press('tab')
+        pyautogui.write(str(cost_center), interval=0.05)
+        pyautogui.press('tab', presses=1)
         time.sleep(0.3)
 
         # 14. Internal Order
-        paste_text(internal_order)
+        pyautogui.write(str(internal_order), interval=0.05)
         pyautogui.press('tab', presses=2)
         time.sleep(0.3)
 
@@ -137,7 +132,8 @@ def run_purchase_macro(supplier, comment_kw, invoice_no, date, GL_Account, amoun
 
         if pdf_file_path and os.path.exists(pdf_file_path):
             abs_path = os.path.abspath(pdf_file_path)
-            paste_text(abs_path)
+            pyperclip.copy(abs_path)
+            time.sleep(0.5)
             
             pyautogui.hotkey('alt', 'n')
             time.sleep(0.3)
@@ -425,7 +421,7 @@ if "latest_invoice_data" in st.session_state:
     st.markdown("---")
     st.subheader("🖥️ 사내 구매 시스템 자동 입력")
     st.info("아래 버튼을 누르면 브라우저가 열립니다. 7초 이내에 'BU code' 입력칸을 마우스로 클릭해주세요!")
-
+    st.info("자판 영문인지 확인해주세요!")
     if st.button("🚀 구매 시스템에 자동 입력 및 PDF 첨부 시작"):
         inv = st.session_state["latest_invoice_data"]
         with st.spinner("매크로 실행 중..."):
