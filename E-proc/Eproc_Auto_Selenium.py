@@ -35,23 +35,37 @@ TARGET_BUY_URL = "https://valeo.determine.com/t/ui/md/home"
 # 🎯 코드 → (Invoicing Company, Cost Center) 매핑 테이블 (여기 새로 추가)
 CODE_MAP = {
     "ANY1": ("KJ03", "OO2144"),
-    "H77":  ("KJ03", "OO2144"),
     "OO2144": ("KJ03", "OO2144"),
-    "YQ1060": ("KJ03", "OO2144"),
-    "OO1063": ("KJ03", "OO2144"),
-    "OO1090": ("KJ03", "OO2144"),
+    "YQ1060": ("KJ03", "YQ1060"),
+    "OO1063": ("KJ03", "OO1063"),
+    "OO1090": ("KJ03", "OO1090"),
     "ANS1": ("T58", "OM1060"),
     "OM1060": ("T58", "OM1060"),
     "KYO1": ("A13", "OJ1060"),
     "OJ1060": ("A13", "OJ1060"),
+    "SEO1": ("KJ03", "OO1063"),
+    "SEO3" : ("KJ03", "YQ1060")
 }
 
-def resolve_company_and_cc(file_name: str, invoice_text: str):
-    """파일명+본문에서 코드를 찾아 회사/코스트센터를 결정론적으로 반환"""
-    combined = f"{file_name} {invoice_text}"
-    for code, (company, cc) in CODE_MAP.items():
-        if code in combined:
-            return company, cc
+def resolve_company_and_cc(file_name: str, invoice_text: str, tsv_data: str, user_keyword: str = None):
+    """🚨 계급(우선순위) 기반 철벽 매칭 시스템"""
+    # 1순위: 유저가 명시한 키워드 (절대 권력)
+    if user_keyword:
+        kw = user_keyword.upper()
+        for code, (comp, cc) in CODE_MAP.items():
+            if code in kw: return comp, cc
+            
+    # 2순위: AI가 분석해 낸 TSV 표 결과물
+    for code, (comp, cc) in CODE_MAP.items():
+        if code in tsv_data.upper(): return comp, cc
+        
+    # 3순위: 업로드된 파일명
+    for code, (comp, cc) in CODE_MAP.items():
+        if code in file_name.upper(): return comp, cc
+        
+    # 4순위: 견적서 본문 텍스트
+    for code, (comp, cc) in CODE_MAP.items():
+        if code in invoice_text.upper(): return comp, cc
     return None, None
 
 # -------------------------------------------------------------------------
@@ -104,30 +118,49 @@ def analyze_invoice_by_price(invoice_text: str, sheet_url: str, user_keyword: st
 {user_keyword if user_keyword else "없음"}
 
 [지시사항]
-1. 🎯 **[핵심 키워드 자동 추출]**:
-   - [업로드된 파일 이름]과 본문에서 1) **통신사**(LG, KT, SK 등)와 2) **사이트/품목 코드**(ANY1, ANS1, H77, KYO1, SEO1 등)를 무조건 찾아내.
-   - 예: 파일명이 'LG - ANY1'이라면 통신사는 'LG', 코드는 'ANY1'이야.
+1. 🎯 **[본문 내 전체 항목 코드 식별 - 단일 아님, 전체 스캔]**:
+   - 견적서/파일 본문을 스캔해서 등장하는 **모든 사이트/품목 코드**(예: SEO1, SEO3, ANY1, KYO1 등)를 빠짐없이 리스트업해.
+   - 만약 [타겟 매칭 키워드]가 "없음"이 아니라면, 그 키워드가 포함하는 코드(들)만 대상으로 삼고 나머지는 무시해. "없음"이면 본문에서 발견되는 코드를 전부 대상으로 삼아.
+   - 🚨 코드가 여러 개면(SEO1, SEO3처럼) **각각을 완전히 독립적인 개별 항목으로 취급**해. 하나로 합치거나 대표 코드 하나만 고르지 마.
 
-2. 🎯 **[템플릿 단일 행 선택 (철벽 교차 검증)]**:
-   - [구글 시트 템플릿 DB]에서 위에서 찾은 **'통신사'와 '사이트/품목 코드'가 모두 포함된 단 1개의 행**을 찾아!
-   - 🚨 주의: 파일명이 LG ANY1인데 DB에서 KT나 ANS1 항목을 고르면 절대 안 돼! 반드시 통신사와 코드가 일치해야 해.
-   - 마지막으로, 선택된 행의 'Unit price' 숫자가 파일의 공급가액(VAT 제외)과 일치하는지 확인해.
+2. 🎯 **[코드별 템플릿 행 매칭 (문자열 완전 동일성 강제)]**:
+   - 1번에서 확정된 코드 **하나하나에 대해** [구글 시트 템플릿 DB]에서 글자 하나까지 100% 동일한 코드가 포함된 행을 찾아.
+   - 🚨🚨 **[접두사 유사 = 다른 코드]**: "SEO1"과 "SEO3"처럼 앞부분이 같아도 끝자리가 다르면 완전히 별개의 코드다. 절대 서로의 대체나 중복으로 착각해서 하나를 빼먹거나 합치지 마.
+   - 🚨🚨 **[동일 코드라도 Short description 포맷이 다르면 별개 항목 — 절대 함께 매칭 금지]**:
+     - 같은 코드(예: ANS1)를 포함하더라도, Short description의 **괄호 구성 형태**가 다르면 서로 완전히 다른 항목이다. 
+     - 예시: "ANAM IT support service fee (ANS1)"는 괄호 안에 코드만 단독으로 들어있는 **표준 포맷**이고, "ANAM IT support service fee(출장비)-ANS1"는 괄호 안에 "출장비"(다른 단어)가 들어가고 그 뒤에 "-ANS1"이 붙은 **변형/추가 항목**이다. 이 둘은 코드 문자열이 겹치더라도 서로 다른 항목이므로 절대 함께 추출하지 마.
+     - 판단 기준: Short description에서 코드가 **괄호 안에 단독으로("(코드)")** 들어있는 표준 포맷 행만 매칭 대상으로 삼아라. 코드 앞뒤에 "출장비", "택배비", 기타 한글/영문 수식어가 붙어 코드가 변형된 형태로 등장하는 행은, [타겟 매칭 키워드]나 견적서 본문이 그 변형 항목을 명시적으로 요구하지 않는 한 **절대 매칭하지 마라.**
+   - 🚨 **[연속 행 묶음]**: 특정 코드 하나가 DB에서 빈 줄 없이 연달아 중복되어 있다면(완전히 동일한 코드이고, 완전히 동일한 Short description 포맷일 때만) 그 연속 블록 전체를 그 코드의 결과로 추출해.
+   - 판단 순서: ① 코드별로 완전 일치 행 탐색 → ② Short description 포맷이 표준 단독 괄호 형태인지 확인(변형 항목이면 제외) → ③ 남은 행들 중에서만 연속 중복 여부 확인. 코드 간에 절대 섞지 마.
 
-3. 🚨 **[Invoicing Company / Cost Center 강제 매칭 그룹]**:
-   - 매칭된 코드(ANY1, H77, OO2144, YQ1060, OO1063, OO1090) 👉 Invoicing Company: **KJ03**, Cost Center: **OO2144** (또는 DB 원본 CC 유지)
-   - 매칭된 코드(ANS1, OM1060) 👉 Invoicing Company: **T58**, Cost Center: **OM1060**
-   - 매칭된 코드(KYO1, OJ1060) 👉 Invoicing Company: **A13**, Cost Center: **OJ1060**
+3. 🚨 **[Cost Center — DB 원본 값 절대 유지, 그룹 기본값으로 덮어쓰기 금지]**:
+   - 각 코드로 찾은 템플릿 행의 **Cost Center 값은 해당 행에 원래 적혀있던 DB 원본 값을 그대로 사용**해. 
+   - 아래 그룹 매핑은 오직 **Invoicing Company를 결정할 때만** 사용하고, Cost Center 컬럼 자체를 그룹 기본값으로 바꿔치기하지 마:
+     - 코드(ANY1, H77, OO2144, YQ1060, OO1063, OO1090 등)가 속한 행 👉 Invoicing Company: **KJ03** / Cost Center는 그 행의 DB 원본값 그대로(OO1063이면 OO1063, YQ1060이면 YQ1060 등 각자 다르게 유지)
+     - 코드(ANS1, OM1060) 👉 Invoicing Company: **T58** / Cost Center는 DB 원본값 유지
+     - 코드(KYO1, OJ1060) 👉 Invoicing Company: **A13** / Cost Center는 DB 원본값 유지
+   - 🚨 즉 같은 Invoicing Company 그룹 안에서도, 코드마다 Cost Center가 다를 수 있다는 걸 명심해. 절대 한 그룹이라고 해서 모든 행에 동일한 CC를 강제하지 마.
 
-4. 🚨 **[포맷 무결성 철벽 방어 (가장 중요!)]**:
-   - 제공된 템플릿 DB의 컬럼 구분자는 `^` 기호로 되어 있어.
-   - 출력할 때 절대 띄어쓰기(스페이스)나 탭을 임의로 쓰지 말고, 원본 그대로 `^` 기호를 사용해서 26개 칸을 완벽히 유지해! 빈 칸도 `^^` 처럼 기호를 유지해.
+4. 🎯 **[다중 항목 결과 병합 - 한 줄이 아니라 코드 개수만큼의 줄]**:
+   - 1번에서 식별된 코드가 N개라면, 최종 데이터는 **N개의 행**으로 구성해. (SEO1, SEO3 두 개면 데이터 2줄)
+   - 각 행은 자신이 매칭된 템플릿 행의 모든 컬럼 값(Short description, Technology, Supplier, Unit price, Cost Center 등)을 그대로 반영해야 해.
+   - 모든 코드의 Invoicing Company가 동일한 그룹으로 판정되면 헤더의 Invoicing Company는 한 번만 표기하고, 데이터 행들만 아래에 쭉 나열해.
+   - 🚨 **[내부 검증용, 출력 절대 금지]**: 추출한 모든 템플릿 행의 'Unit price' 합계가 견적서 본문에 적힌 전체 항목의 공급가액 합계(VAT 제외)와 일치하는지 **너 스스로 속으로만 계산해서 확인**해. 이 검증 과정, 계산 결과, 합계 숫자는 **최종 답변에 절대 텍스트로 출력하지 마.** 오직 6번 출력 형식에 정의된 줄들만 출력해.
 
-5. ⚠️ **[출력 형식 규칙]**:
-   - 첫 번째 줄: Invoicing Company (A13, T58, KJ03)
-   - 두 번째 줄: Cost Center 코드
-   - 세 번째 줄: 26개 컬럼 헤더(1행) ➔ 반드시 `^` 기호로 연결
-   - 네 번째 줄: 데이터(2행) ➔ 반드시 `^` 기호로 연결
-   - 마크다운이나 부연설명은 일절 출력하지 마.
+5. 🚨 **[포맷 무결성 철벽 방어]**:
+   - 템플릿 DB의 컬럼 구분자는 `^` 기호야.
+   - 출력할 때 띄어쓰기(스페이스)나 탭을 임의로 쓰지 말고 원본 그대로 `^` 기호로 26개 칸을 유지해. 빈 칸도 `^^`처럼 기호를 유지해.
+
+6. ⚠️ **[출력 형식 규칙 - 이 형식 외 그 어떤 텍스트도 절대 출력 금지]**:
+   - 첫 번째 줄: Invoicing Company (A13, T58, KJ03) — 그룹이 같으면 한 번만
+   - 두 번째 줄: 26개 컬럼 헤더(1행) ➔ 반드시 `^` 기호로 연결
+   - 세 번째 줄부터: 코드별 데이터 행 ➔ 각 행 반드시 `^` 기호로 연결, 코드 개수만큼 줄 생성 (각 행의 Cost Center는 DB 원본값 그대로 개별 반영)
+   - 🚨🚨 **[절대 출력 금지 목록]**: 아래와 같은 문구/텍스트는 어떤 형태로든 절대 출력하지 마.
+     - "Unit price 합계", "합계: OOO KRW" 등 금액 합산 결과
+     - "반영 완료!", "매칭 완료!", "확인 완료!" 등 작업 완료 알림 문구
+     - "템플릿 분석 완료", "검토 중..." 등 진행 상태 멘트
+     - 그 외 위 4개 줄(Invoicing Company / 헤더 / 데이터 행들) 이외의 모든 부연 설명, 인사말, 마무리 멘트
+   - 위 4개 항목(Invoicing Company, 헤더, 데이터 행)을 제외한 어떤 줄도 답변에 포함되면 안 돼. 검증은 네 머릿속에서만 하고, 결과 텍스트에는 절대 드러내지 마.
 """
 
     response = client.chat.completions.create(
@@ -137,20 +170,21 @@ def analyze_invoice_by_price(invoice_text: str, sheet_url: str, user_keyword: st
     )
     
     raw_result = response.choices[0].message.content
-    clean_text = re.sub(r'```tsv\n|```\n|```|"""', '', raw_result).strip('\r\n')
-    
+    clean_text = re.sub(r'```tsv\n|```[a-zA-Z]*\n|```|"""', '', raw_result).strip('\r\n')
+
     lines = clean_text.split('\n')
-    tsv_data = '\n'.join(lines[2:]).replace('^', '\t')
-    
-    # 🚨 GPT 출력은 신뢰하지 않고, 파이썬 룰로만 100% 결정론적으로 매칭
-    inv_company, cost_center = resolve_company_and_cc(file_name, invoice_text)
-    
-    if inv_company is None:
-        raise ValueError(
-            f"⚠️ 코드 매칭 실패: 파일명({file_name}) / 본문에서 등록된 사이트 코드를 찾을 수 없습니다. "
-            f"CODE_MAP에 해당 코드를 추가해주세요."
-        )
-    
+
+    # 실제 헤더 줄("Purchase item"으로 시작)을 찾아서 그 줄부터 끝까지를 원본 그대로 확정
+    header_idx = next((i for i, line in enumerate(lines) if line.strip().startswith('Purchase item')), None)
+
+    if header_idx is None:
+        tsv_data = clean_text.replace('^', '\t')
+    else:
+        tsv_data = '\n'.join(lines[header_idx:]).replace('^', '\t')
+
+    # 🚨 파이썬 철벽 방어 맵으로 최종 확정
+    inv_company, cost_center = resolve_company_and_cc(file_name, invoice_text, tsv_data, user_keyword)
+
     return tsv_data, inv_company, cost_center
 
 # -------------------------------------------------------------------------
@@ -650,12 +684,12 @@ if invoice_content:
                         
                         # 1) TSV 데이터에서 'Short description' 텍스트만 추출
                         try:
-                            headers = tsv_result.split('\n')[0].split('\t')
-                            # 'Short description'이 포함된 헤더의 인덱스 찾기
+                            tsv_lines = tsv_result.split('\n')  # ← tsv_result 원본은 그대로, 새 리스트만 생성
+                            headers = tsv_lines[0].split('\t')
                             desc_idx = next(i for i, h in enumerate(headers) if 'Short description' in h)
-                            short_desc = tsv_result.split('\n')[1].split('\t')[desc_idx].strip()
-                        except Exception:
-                            # 만약 추출에 실패할 경우를 대비한 안전 기본값
+                            short_desc = tsv_lines[1].split('\t')[desc_idx].strip()  # ← strip()은 short_desc 복사본에만 적용, tsv_result엔 영향 없음
+                        except Exception as e:
+                            print(f"⚠️ short_desc 추출 실패: {e}")
                             short_desc = ""
 
                         # 2) 오늘 날짜(YYYY.MM) 가져오기 및 텍스트 합성
