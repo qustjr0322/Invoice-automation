@@ -3,54 +3,86 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import os
 import json
-import gspread
+import pandas as pd
 from pypdf import PdfReader
-import fitz  # PyMuPDF (이미지 PDF 파싱용)
-import webbrowser
-import pyautogui
-import time
-import pyperclip
-import glob
-import re
+import fitz  # PyMuPDF
 import base64
-from io import BytesIO
-from PIL import Image
+import re
+import time
+import pyautogui
+import pyperclip
+
+# --- 셀레니움 관련 모듈 추가 ---
+from selenium import webdriver
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import undetected_chromedriver as uc
 
 load_dotenv()
 
-# --- 1. 구글 시트 연결 ---
-worksheet = None
-try:
-    gc = gspread.oauth(
-        credentials_filename='client_secret.json',
-        authorized_user_filename='authorized_user.json'
-    )
-    sheet_url = 'https://docs.google.com/spreadsheets/d/1j_uveQsax4_Lz_aoyhViSJk769W7lkZVyUZ107-9wcw/edit'
-    worksheet = gc.open_by_url(sheet_url).sheet1
-except Exception as e:
-    st.error(f"구글 시트 연동 오류: {e}")
+# 페이지 기본 설정
+st.set_page_config(page_title="E-Procurement Auto Assistant", page_icon="📑", layout="centered")
 
-# --- 2. 매크로 자동화 함수 ---
-def run_purchase_macro(supplier, comment_kw, invoice_no, date, GL_Account, amount, cost_center, internal_order, pdf_file_path=None):
+# --- 1. 구글 시트 템플릿 읽기 ---
+def get_template_data():
     try:
-        target_url = "https://financesscportal.appengine.valeo.com/request/new?form=11&detail=false"
+        sheet_id = '1j_uveQsax4_Lz_aoyhViSJk769W7lkZVyUZ107-9wcw'
+        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+        df = pd.read_csv(csv_url)
+        all_rows = [df.columns.tolist()] + df.fillna("").values.tolist()
+        return all_rows
+    except Exception as e:
+        st.error(f"템플릿 데이터 읽기 오류: {e}")
+        return None
+
+# --- 2. 매크로 자동화 함수 (UC Chrome + PyAutoGUI) ---
+def run_purchase_macro(supplier, comment_kw, invoice_no, date, GL_Account, amount, cost_center, internal_order, bu_code='A13', req_type='', category='', pdf_file_path=None):
+    driver = None
+    try:
+        st.toast("🧹 기존 크롬 프로세스 정리 및 설정 중...", icon="🔄")
+        os.system("taskkill /f /im chromedriver.exe /t >nul 2>&1")                
+        time.sleep(1.0)
         
-        # 크롬 브라우저 실행
-        chrome_path = 'C:/Program Files/Google/Chrome/Application/chrome.exe %s'
+        lock_file = r'C:\ChromeProfile_Automation_v2\SingletonLock'
+        if os.path.exists(lock_file):
+            try: os.remove(lock_file)
+            except: pass
+
+        options = uc.ChromeOptions()
+        options.add_argument(r'--user-data-dir=C:\ChromeProfile_Automation_v2')
+        options.add_argument('--profile-directory=Default')
+        options.add_argument('--no-first-run')
+        options.add_argument('--no-service-autorun')
+        options.add_argument('--start-maximized') 
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--remote-debugging-port=0')
+
         try:
-            webbrowser.get(chrome_path).open(target_url)
-        except Exception:
-            try:
-                chrome_path_x86 = 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe %s'
-                webbrowser.get(chrome_path_x86).open(target_url)
-            except Exception:
-                webbrowser.open(target_url)
+            driver = uc.Chrome(options=options, version_main=152, use_subprocess=True) 
+        except Exception as uc_e:
+            return False, f"⚠️ 크롬을 제어할 수 없습니다. 열려있는 '크롬 창'을 닫고 시도해주세요! (오류: {uc_e})"
+        
+        target_url = "https://financesscportal.appengine.valeo.com/request/new?form=11&detail=false"
+        driver.get(target_url)
+        
+        print("🚀 프로세스 시작 및 SSO 로그인 대기 중...")
+        st.toast("🌐 구매 포털 접속 중... SSO 인증을 대기합니다.", icon="🚀")
+
+        wait = WebDriverWait(driver, 60)
+        try:
+            wait.until(EC.url_contains("financesscportal.appengine.valeo.com"))
+            print("✅ SSO 통과 및 목적지 URL 진입 성공")
+        except:
+            return False, "❌ SSO 로그인 대기 시간 초과! 직접 화면에서 로그인을 완료해주거나 세션을 확인하세요."
+
+        time.sleep(3)
         
         st.toast("⏳ 7초 안에 열린 창에서 'BU code' 입력칸을 클릭하세요!", icon="⚠️")
         time.sleep(7)
 
-        # 1. BU Code
-        pyautogui.write('a13', interval=0.1) 
+        # 1. BU Code 
+        pyautogui.write(str(bu_code).lower() if bu_code else 'a13', interval=0.1) 
         pyautogui.press('tab', presses=1) 
         time.sleep(1.0)
         
@@ -59,24 +91,27 @@ def run_purchase_macro(supplier, comment_kw, invoice_no, date, GL_Account, amoun
         pyautogui.press('tab', presses=1)
         time.sleep(1.0)
         
-        # 3. Type
-        pyautogui.write('d', interval=0.1) 
+        # 3. Type 
+        req_char = str(req_type)[0].lower() if req_type else 'd'
+        pyautogui.write(req_char, interval=0.1) 
         pyautogui.press('enter', presses=1)
         time.sleep(0.2)
         pyautogui.press('tab', presses=1)
         time.sleep(1.0) 
         
         # 4. Category
-        pyautogui.write('IS', interval=0.1) 
+        pyautogui.write(str(category) if category else 'IS', interval=0.1) 
         pyautogui.press('tab', presses=1)
         time.sleep(1.0)
         
         # 5. Request Comments 
-        pyautogui.write(str(comment_kw), interval=0.05)
+        pyperclip.copy(str(comment_kw))
+        pyautogui.hotkey('ctrl', 'v')
+        time.sleep(0.1)
         pyautogui.press('tab', presses=1) 
         time.sleep(0.3)
 
-        # 6. Supplier Name (업체 코드 기입 후 드롭다운 선택)
+        # 6. Supplier Name 
         pyautogui.write(str(supplier), interval=0.05)
         time.sleep(2.0)
         pyautogui.press('down')
@@ -126,7 +161,7 @@ def run_purchase_macro(supplier, comment_kw, invoice_no, date, GL_Account, amoun
         pyautogui.press('tab', presses=2)
         time.sleep(0.3)
 
-        # 15. Upload invoice 버튼 클릭 및 파일 선택
+        # 15. Upload invoice
         pyautogui.press('enter', presses=2)
         time.sleep(2)
 
@@ -144,21 +179,33 @@ def run_purchase_macro(supplier, comment_kw, invoice_no, date, GL_Account, amoun
             time.sleep(0.5)
             pyautogui.press('enter')
             time.sleep(0.8)
-                
-        return True, "✅ 구매 시스템 자동 입력 및 PDF 파일 업로드가 완료되었습니다!"
+
+        print("✅ 진행 완료! 창을 닫지 않고 유지합니다.")
+        # 🚨 finally 블록을 삭제하여 창이 안 닫히게 설정 됨
+        return True, "✅ 구매 시스템 자동 입력 및 PDF 파일 업로드가 완료되었습니다! (직접 검토 후 제출해주세요)"
+
     except Exception as e:
-        return False, f"❌ 매크로 오류: {str(e)}"
+        if driver:
+            driver.quit()
+        return False, f"❌ 매크로 오류 발생: {str(e)}"
+    
+    # finally 구문을 삭제하여 정상 완료 시 창을 열어둡니다.
 
-# --- 3. UI 설정 ---
+# --- 3. UI 및 OpenAI 세팅 ---
 with st.sidebar:
+    st.header("📁 파일 업로드 및 분석")
     openai_api_key = os.getenv('OPENAI_API_KEY') 
-    st.markdown("---")
     uploaded_file = st.file_uploader("인보이스(PDF)를 업로드하세요", type=["pdf"])
+    st.markdown("---")
+    
+    # 💡 분석 시작 버튼 추가
+    is_analyze_clicked = st.button("🚀 업로드된 파일 분석 시작", type="primary", use_container_width=True)
 
-st.title("💬 인보이스 자동 추출 & 구매 시스템 등록 봇")
+st.title("📑 인보이스 자동 추출 & 구매 등록 봇")
+st.caption("사이드바에서 파일을 업로드하고 '분석 시작'을 누르거나 아래 채팅창에 입력하세요.")
 
 if "messages" not in st.session_state:
-    st.session_state["messages"] = [{"role": "assistant", "content": "PDF 업로드 후 '숫자 1' 입력 후 엔터!"}]
+    st.session_state["messages"] = [{"role": "assistant", "content": "PDF를 업로드한 후 좌측의 **'🚀 분석 시작'** 버튼을 클릭하세요."}]
 
 for msg in st.session_state.messages:
     st.chat_message(msg["role"]).write(msg["content"])
@@ -172,27 +219,35 @@ def get_pdf_text(file):
             text += extracted + "\n"
     return text.strip()
 
-# --- 4. 메인 처리 로직 ---
-if prompt := st.chat_input():
+# --- 4. 메인 처리 로직 (버튼 or 채팅 동시 지원) ---
+user_text_input = st.chat_input("추가 요청사항을 입력하거나 텍스트를 붙여넣으세요...")
+
+# 분석 버튼을 눌렀거나, 엔터를 쳤을 때 시작
+if is_analyze_clicked or user_text_input:
     if not openai_api_key:
         st.info("API 키를 추가해주세요.")
         st.stop()
 
     client = OpenAI(api_key=openai_api_key)
+    
+    # 프롬프트 설정 (버튼 클릭시 기본 메세지 송출)
+    prompt = user_text_input if user_text_input else "업로드된 파일 분석을 요청합니다."
+    
     st.session_state.messages.append({"role": "user", "content": prompt}) 
     st.chat_message("user").write(prompt) 
     
     if uploaded_file is not None:
-        save_dir = os.path.join(os.getcwd(), "temp_downloads")
-        os.makedirs(save_dir, exist_ok=True)
-        saved_pdf_path = os.path.join(save_dir, uploaded_file.name)
-        
-        with open(saved_pdf_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+        with st.spinner("📄 파일을 분석하고 구글 시트와 대조 중입니다..."):
+            save_dir = os.path.join(os.getcwd(), "temp_downloads")
+            os.makedirs(save_dir, exist_ok=True)
+            saved_pdf_path = os.path.join(save_dir, uploaded_file.name)
+            
+            with open(saved_pdf_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
 
-        pdf_text = get_pdf_text(uploaded_file)
-        
-        system_instruction = """
+            pdf_text = get_pdf_text(uploaded_file)
+            
+            system_instruction = """
 당신은 세금계산서, 거래명세서, 청구서 분석 전문가입니다.
 주어진 파일(PDF 또는 이미지)에서 정보를 정확히 추출하여 반드시 아래와 같은 JSON 형식으로만 응답하세요.
 
@@ -222,98 +277,86 @@ if prompt := st.chat_input():
   "internal_order": ""
 }
 """
+            doc = fitz.open(saved_pdf_path)
+            image_contents = []
+            for page in doc:
+                pix = page.get_pixmap(dpi=150)
+                img_data = pix.tobytes("png")
+                base64_image = base64.b64encode(img_data).decode('utf-8')
+                image_contents.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{base64_image}"}
+                })
 
-        doc = fitz.open(saved_pdf_path)
-        image_contents = []
-        for page in doc:
-            pix = page.get_pixmap(dpi=150)
-            img_data = pix.tobytes("png")
-            base64_image = base64.b64encode(img_data).decode('utf-8')
-            image_contents.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{base64_image}"}
-            })
+            user_msg = [{"type": "text", "text": f"첨부된 인보이스/거래명세서 이미지에서 정보를 읽어 정밀 추출해주세요. 사용자 요청: {prompt}"}] + image_contents
+            messages_for_api = [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": user_msg}
+            ]
 
-        user_msg = [{"type": "text", "text": f"첨부된 인보이스/거래명세서 이미지에서 정보를 읽어 정밀 추출해주세요. 사용자 요청: {prompt}"}] + image_contents
-        messages_for_api = [
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": user_msg}
-        ]
-
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            temperature=0.0,
-            response_format={ "type": "json_object" },
-            messages=messages_for_api
-        ) 
-        msg = response.choices[0].message.content
-        
-        try:
-            data = json.loads(msg) 
-            supplier = data.get('supplier', '-').strip()
-            comment_kw = data.get('comment_keyword', '-').strip()
-            raw_invoice_no = data.get('invoice number', '-').strip()
-            raw_date = data.get('date', '-').strip()
-            amount = data.get('amount', '-').strip()
-            gl_account = data.get('gl_account', '').strip()
-            cost_center = data.get('cost_center', '').strip()
-            internal_order = data.get('internal_order', '').strip()
-
-            # 🎯 [승인번호 정규식 완벽 정제]
-            invoice_no = re.sub(r'(2026\d{4})A', r'\141', raw_invoice_no)
-            invoice_no = re.sub(r'a[0oO]?wcc$', 'aowcc', invoice_no, flags=re.IGNORECASE)
-            if 'aowcc' not in invoice_no.lower() and 'wcc' in invoice_no.lower():
-                invoice_no = re.sub(r'a?0*wcc$', 'aowcc', invoice_no, flags=re.IGNORECASE)
-
-            # 🎯 2. LG U+ 청구서 전용 고객번호 강제 추출 패치
-            # 지로번호(6121857)나 사업자번호(2208139938)가 뽑혔더라도 문서 내 진짜 고객번호 탐색
-            if "u+" in supplier.lower() or "lg" in supplier.lower() or "유플러스" in supplier:
-                # PDF 텍스트 내에 LG U+ 마스터 고객번호 패턴이 있으면 무조건 고객번호로 교체
-                if "511808413119" in pdf_text or "511808413119" in raw_invoice_no:
-                    invoice_no = "511808413119"
-                elif "399001198525" in pdf_text or "399001198525" in raw_invoice_no:
-                    invoice_no = "399001198525"
-
-            # 🎯 [날짜 포맷 정제]
-            date_digits = re.sub(r'[^0-9]', '', raw_date)
-            if len(date_digits) == 8:
-                date = f"{date_digits[:4]}-{date_digits[4:6]}-{date_digits[6:]}"
-            else:
-                date = raw_date
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                temperature=0.0,
+                response_format={ "type": "json_object" },
+                messages=messages_for_api
+            ) 
+            msg = response.choices[0].message.content
             
-            # 🎯 [구글 시트 처리 - 템플릿 정보만 참조 후 무조건 맨 아래 신규 행 추가]
-            if worksheet is not None:
-                try:
-                    all_rows = worksheet.get_all_values()
-                    
-                    # 기본 공통값 설정
-                    supplier_code = ""
-                    gl_account = "61402100"
-                    cost_center = "OJ1060"
-                    internal_order = "131900000441"
-                    final_comment_kw = comment_kw
-                    
+            try:
+                data = json.loads(msg) 
+                supplier = data.get('supplier', '-').strip()
+                comment_kw = data.get('comment_keyword', '-').strip()
+                raw_invoice_no = data.get('invoice number', '-').strip()
+                raw_date = data.get('date', '-').strip()
+                amount = data.get('amount', '-').strip()
+                
+                # 기본값 설정
+                gl_account = data.get('gl_account', '61402100').strip()
+                cost_center = data.get('cost_center', 'OJ1060').strip()
+                internal_order = data.get('internal_order', '131900000441').strip()
+                supplier_code = ""
+                final_comment_kw = comment_kw
+                req_type = ""
+                category_val = ""
+                bu_code = "A13"
+
+                invoice_no = re.sub(r'(2026\d{4})A', r'\141', raw_invoice_no)
+                invoice_no = re.sub(r'a[0oO]?wcc$', 'aowcc', invoice_no, flags=re.IGNORECASE)
+                if 'aowcc' not in invoice_no.lower() and 'wcc' in invoice_no.lower():
+                    invoice_no = re.sub(r'a?0*wcc$', 'aowcc', invoice_no, flags=re.IGNORECASE)
+
+                if "u+" in supplier.lower() or "lg" in supplier.lower() or "유플러스" in supplier:
+                    if "511808413119" in pdf_text or "511808413119" in raw_invoice_no:
+                        invoice_no = "511808413119"
+                    elif "399001198525" in pdf_text or "399001198525" in raw_invoice_no:
+                        invoice_no = "399001198525"
+
+                date_digits = re.sub(r'[^0-9]', '', raw_date)
+                if len(date_digits) == 8:
+                    date = f"{date_digits[:4]}-{date_digits[4:6]}-{date_digits[6:]}"
+                else:
+                    date = raw_date
+                
+                all_rows = get_template_data()
+                
+                if all_rows:
                     clean_supplier = re.sub(r'\(주\)|주식회사|\s+|유플러스', 'u+', supplier).lower()
                     extracted_words = re.findall(r'[A-Za-z0-9]+', comment_kw)
 
-                    # 1단계: 업체명이 일치하는 템플릿 행들 필터링
                     matched_rows = []
                     for idx, row in enumerate(all_rows, start=1):
-                        if idx == 1: continue # 헤더 스킵
-                        sheet_company_name = row[0].strip() if len(row) > 0 else ""
+                        if idx == 1: continue 
+                        sheet_company_name = str(row[0]).strip() if len(row) > 0 else ""
                         clean_sheet_company = re.sub(r'\(주\)|주식회사|\s+|유플러스', 'u+', sheet_company_name).lower()
 
                         if clean_supplier and clean_sheet_company and (clean_supplier in clean_sheet_company or clean_sheet_company in clean_supplier):
                             matched_rows.append(row)
 
-                    # 2단계: 필터링된 템플릿 중 가장 적절한 표준 템플릿 데이터 추출 (수정은 안 함!)
                     if matched_rows:
                         best_template = None
-
-                        # ① H열(고객번호) 또는 K열(금액)이 일치하는 템플릿 찾기
                         for row in matched_rows:
-                            existing_inv_no = row[7].strip() if len(row) > 7 else ""
-                            existing_amount = row[10].strip() if len(row) > 10 else ""
+                            existing_inv_no = str(row[7]).strip() if len(row) > 7 else ""
+                            existing_amount = str(row[10]).strip() if len(row) > 10 else ""
                             clean_existing_amt = re.sub(r'[^0-9]', '', existing_amount)
                             clean_current_amt = re.sub(r'[^0-9]', '', amount)
 
@@ -322,7 +365,6 @@ if prompt := st.chat_input():
                                 best_template = row
                                 break
 
-                        # ② 금액/번호 일치 항목 없으면 품목 키워드로 매칭
                         if not best_template:
                             translation_map = {
                                 "유지보수": ["maintenance", "support", "maint"],
@@ -339,7 +381,7 @@ if prompt := st.chat_input():
                             }
                             
                             for row in matched_rows:
-                                sheet_comment = row[5].strip() if len(row) > 5 else ""
+                                sheet_comment = str(row[5]).strip() if len(row) > 5 else ""
                                 comment_kw_lower = comment_kw.lower()
                                 sheet_comment_lower = sheet_comment.lower()
 
@@ -359,74 +401,68 @@ if prompt := st.chat_input():
                                     best_template = row
                                     break
 
-                        # ③ 키워드 매칭도 실패하면 해당 업체의 첫 번째 템플릿 사용
                         if not best_template:
                             best_template = matched_rows[0]
 
-                        # 매칭된 템플릿 데이터 추출
                         if best_template:
-                            if len(best_template) > 5 and best_template[5].strip(): final_comment_kw = best_template[5].strip()
-                            if len(best_template) > 6 and best_template[6].strip(): supplier_code = best_template[6].strip()
-                            if len(best_template) > 9 and best_template[9].strip(): gl_account = best_template[9].strip()
-                            if len(best_template) > 11 and best_template[11].strip(): cost_center = best_template[11].strip()
-                            if len(best_template) > 12 and best_template[12].strip(): internal_order = best_template[12].strip()
+                            if len(best_template) > 1 and str(best_template[1]).strip(): bu_code = str(best_template[1]).strip()
+                            if len(best_template) > 3 and str(best_template[3]).strip(): req_type = str(best_template[3]).strip()
+                            if len(best_template) > 4 and str(best_template[4]).strip(): category_val = str(best_template[4]).strip()
+                            if len(best_template) > 5 and str(best_template[5]).strip(): final_comment_kw = str(best_template[5]).strip()
+                            if len(best_template) > 6 and str(best_template[6]).strip(): supplier_code = str(best_template[6]).strip()
+                            if len(best_template) > 9 and str(best_template[9]).strip(): gl_account = str(best_template[9]).strip()
+                            if len(best_template) > 11 and str(best_template[11]).strip(): cost_center = str(best_template[11]).strip()
+                            if len(best_template) > 12 and str(best_template[12]).strip(): internal_order = str(best_template[12]).strip()
 
-                    # 3단계: 세션 데이터 저장 (구매 매크로 실행용)
-                    st.session_state["latest_invoice_data"] = {
-                        "supplier": supplier,
-                        "supplier_code": supplier_code,
-                        "comment_kw": final_comment_kw,
-                        "invoice_no": invoice_no,
-                        "date": date,
-                        "GL_Account": gl_account,
-                        "amount": amount,
-                        "cost_center": cost_center,
-                        "internal_order": internal_order,
-                        "pdf_path": saved_pdf_path
-                    }
-
-                    display_msg = f"""### 📄 인보이스 정보 추출 완료!
-* **업체명**: {supplier}
+                display_msg = f"""### 📄 인보이스 정보 추출 완료! (템플릿 매칭 적용)
+* **업체명 (코드)**: {supplier} ({supplier_code if supplier_code else '수동입력 필요'})
 * **품목/서비스**: {final_comment_kw}
+* **요청 Type**: {req_type if req_type else '기본값'}
+* **카테고리(Category)**: {category_val if category_val else '기본값'}
 * **승인 번호**: {invoice_no}
 * **발행 날짜**: {date}
 * **금액**: {amount}
+* **GL Account**: {gl_account} | **Cost Center**: {cost_center}
+
+✅ 매크로 실행 준비가 완료되었습니다! 아래의 실행 버튼을 눌러주세요.
 ---
 """
+                st.session_state["latest_invoice_data"] = {
+                    "supplier": supplier_code if supplier_code else supplier,
+                    "comment_kw": final_comment_kw,
+                    "invoice_no": invoice_no,
+                    "date": date,
+                    "GL_Account": gl_account,
+                    "amount": amount,
+                    "cost_center": cost_center,
+                    "internal_order": internal_order,
+                    "bu_code": bu_code,
+                    "req_type": req_type,
+                    "category": category_val,
+                    "pdf_path": saved_pdf_path
+                }
 
-                    # 4단계: 템플릿 건드리지 않고 무조건 구글 시트 맨 아래 [신규 행] 추가
-                    new_row = [
-                        supplier, "A13", "Domestic", "Debit note", "IS", 
-                        final_comment_kw, 
-                        supplier_code, invoice_no, date, 
-                        gl_account, 
-                        amount, 
-                        cost_center, 
-                        internal_order
-                    ]
-                    worksheet.append_row(new_row)
-                    display_msg += f"✅ **[{supplier} - {final_comment_kw}] 마스터 템플릿 참조 후 [신규 행]으로 등록되었습니다!**"
+            except Exception as e:
+                display_msg = f"❌ AI 응답 해석 오류: `{e}`"
 
-                except Exception as sheet_err:
-                    display_msg += f"\n⚠️ **구글 시트 기입 실패**: `{sheet_err}`"
-
-        except Exception as e:
-            display_msg = f"❌ AI 응답 해석 오류: `{e}`"
-
-        st.session_state.messages.append({"role": "assistant", "content": display_msg}) 
-        st.chat_message("assistant").write(display_msg)
+            st.session_state.messages.append({"role": "assistant", "content": display_msg}) 
+            st.chat_message("assistant").write(display_msg)
+    else:
+        # 파일 업로드 안하고 분석 요청했을 때의 방어 로직
+        msg = "⚠️ 파일이 첨부되지 않았습니다. 사이드바에서 PDF 파일을 먼저 업로드해주세요."
+        st.session_state.messages.append({"role": "assistant", "content": msg})
+        st.chat_message("assistant").write(msg)
 
 # --- 5. 구매 시스템 자동 입력 버튼 ---
 if "latest_invoice_data" in st.session_state:
     st.markdown("---")
     st.subheader("🖥️ 사내 구매 시스템 자동 입력")
-    st.info("아래 버튼을 누르면 브라우저가 열립니다. 7초 이내에 'BU code' 입력칸을 마우스로 클릭해주세요!")
-    st.info("자판 영문인지 확인해주세요!")
-    if st.button("🚀 구매 시스템에 자동 입력 및 PDF 첨부 시작"):
+    st.info("버튼 클릭 후 브라우저가 열리면 7초 이내에 'BU code' 입력칸을 클릭해주세요! (영문 자판 필수)")
+    if st.button("🚀 자동 등록(PyAutoGUI) 실행", type="secondary"):
         inv = st.session_state["latest_invoice_data"]
-        with st.spinner("매크로 실행 중..."):
+        with st.spinner("매크로 실행 중... 완료 시까지 마우스와 키보드를 조작하지 마세요!"):
             success, result_msg = run_purchase_macro(
-                supplier=inv["supplier_code"],
+                supplier=inv["supplier"], 
                 comment_kw=inv["comment_kw"],
                 invoice_no=inv["invoice_no"],
                 date=inv["date"],
@@ -434,6 +470,9 @@ if "latest_invoice_data" in st.session_state:
                 amount=inv["amount"],
                 cost_center=inv["cost_center"],
                 internal_order=inv["internal_order"],
+                bu_code=inv.get("bu_code", "A13"),
+                req_type=inv.get("req_type", ""),
+                category=inv.get("category", ""),
                 pdf_file_path=inv.get("pdf_path")
             )
             if success: st.success(result_msg)
