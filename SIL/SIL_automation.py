@@ -43,13 +43,14 @@ def run_purchase_macro(supplier, comment_kw, invoice_no, date, GL_Account, amoun
         os.system("taskkill /f /im chromedriver.exe /t >nul 2>&1")                
         time.sleep(1.0)
         
-        lock_file = r'C:\ChromeProfile_Automation_v2\SingletonLock'
+        profile_path = r'C:\ChromeProfile_Auto_SIL'
+        lock_file = os.path.join(profile_path, 'SingletonLock')
         if os.path.exists(lock_file):
             try: os.remove(lock_file)
             except: pass
 
         options = uc.ChromeOptions()
-        options.add_argument(r'--user-data-dir=C:\ChromeProfile_Automation_v2')
+        options.add_argument(f'--user-data-dir={profile_path}')
         options.add_argument('--profile-directory=Default')
         options.add_argument('--no-first-run')
         options.add_argument('--no-service-autorun')
