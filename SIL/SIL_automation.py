@@ -261,6 +261,8 @@ if is_analyze_clicked or user_text_input:
 2. 'invoice number': 
    - **'220-81-39938' 같은 공급자/공급받는자 사업자등록번호는 절대로 invoice number로 가져오지 마세요.**
    - 문서 내의 '국세청 승인번호', '고객번호'(예: 511808413119, 399001198525 등), 또는 '승인/관리/청구 번호'를 최우선으로 추출하세요.
+   - 🚨 [초정밀 스캔 요구] 국세청 승인번호나 아남아이티 등의 승인번호는 보통 **24자리**의 긴 영문/숫자 조합입니다 (예: 2026091541000008000b55Ip).
+   - 절대 중간 글자(41, 8000b 등)를 건너뛰거나 0으로 축약하지 마세요. 이미지를 세밀하게 관찰하여 24자리 원본 그대로 대소문자까지 완벽하게 추출하세요.
 
 [⚠️ 기타 추출 지시사항]
 3. 'comment_keyword': '품목', '청구명', '이용서비스' 내용의 핵심 키워드 (예: 'U+ 오피스넷', 'Lease', 'Server', 'WEBLC' 등)
@@ -281,12 +283,13 @@ if is_analyze_clicked or user_text_input:
             doc = fitz.open(saved_pdf_path)
             image_contents = []
             for page in doc:
-                pix = page.get_pixmap(dpi=150)
+                pix = page.get_pixmap(dpi=300)
                 img_data = pix.tobytes("png")
                 base64_image = base64.b64encode(img_data).decode('utf-8')
                 image_contents.append({
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{base64_image}"}
+                    "image_url": {"url": f"data:image/png;base64,{base64_image}"},
+                    "detail" : "high"
                 })
 
             user_msg = [{"type": "text", "text": f"첨부된 인보이스/거래명세서 이미지에서 정보를 읽어 정밀 추출해주세요. 사용자 요청: {prompt}"}] + image_contents
