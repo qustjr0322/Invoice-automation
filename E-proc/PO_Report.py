@@ -8,6 +8,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import Select
+from selenium.webdriver.common.action_chains import ActionChains
 import pandas as pd
 
 import smtplib
@@ -72,6 +73,23 @@ def start_sso_macro():
         driver.get(target_url)
         
         print("🚀 프로세스 시작 및 SSO 로그인 대기 중...")
+
+        # ========================================================
+        # 📌 [추가] Determine SSO / SAML 로그인 페이지 클릭 대응
+        # ========================================================
+        try:
+            # SAML 로그인 버튼이 보일 때까지 최대 5초 대기 후 클릭 시도
+            saml_btn = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH, '//*[@id="saml_input0"]'))
+            )
+            print("🔍 SAML 로그인 페이지 감지됨. SSO 버튼 클릭 중...")
+            saml_btn.click()
+            print("✅ SAML 버튼 클릭 완료! 로그인 진행 중...")
+            time.sleep(2)  # SSO 리다이렉트 대기
+        except Exception:
+            # 버튼이 없는 경우(이미 로그인 세션이 살아있는 경우) 에러 없이 그냥 통과
+            pass
+        # ========================================================
 
         # SSO 인증 대기 (최대 60초)
         wait = WebDriverWait(driver, 60)
@@ -398,78 +416,69 @@ def start_sso_macro():
             print(f"❌ 12단계 데이터 정제 실패: {e}")
             return
 
-        # --- 13. 셀레니움 웹 Gmail을 이용한 이메일 자동 발송 (단축키 & DOM 개선) ---
+        # --- 13. 웹 Gmail 이메일 발송 (JS 직접 주입으로 가림막 우회) ---
         try:
-            print("⏳ 13. 웹 Gmail 접속 및 이메일 자동 발송 시작...")
+            print("⏳ 13. 웹 Gmail 작성 페이지 진입 및 이메일 자동 발송 시작...")
             
             abs_sorted_filepath = os.path.abspath(sorted_filepath)
             if not os.path.exists(abs_sorted_filepath):
                 print("⚠️ 첨부할 정제 CSV 파일을 찾을 수 없습니다.")
                 return
 
-            # 웹 Gmail 이동
-            driver.get("https://mail.google.com/mail/u/0/#inbox")
-            time.sleep(4)
+            # 1. 작성 창이 열린 상태로 Gmail 진입
+            driver.get("https://mail.google.com/mail/u/0/#inbox?compose=new")
+            time.sleep(5)
 
-            # 1. '편지쓰기' 버튼 클릭 (단축키 'c' 활용 또는 콤포즈 클래스 클릭)
-            print("✉️ '편지쓰기' 창 열기 중...")
-            try:
-                # 단축키 'c' 입력으로 작성 창 띄우기 시도
-                driver.find_element(By.TAG_NAME, 'body').send_keys('c')
-                time.sleep(2)
-            except Exception:
-                # 단축키 실패 시 Class/Role 요소 직접 클릭
-                compose_btn = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, "div[role='button'][gh='cm']"))
-                )
-                compose_btn.click()
-                time.sleep(2)
-
-            # 2. 수신자(To) 입력 (Gmail 표준 수신자 입력 요소)
+            # 2. 수신자 입력
             print("👤 수신자 입력 중...")
-            to_field = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, "//input[@type='text' and (@peoplekit-inputbox='true' or @aria-label='To' or @aria-label='수신' or @aria-label='수신자')] | //div[@role='combobox']//input"))
-            )
-            to_field.click()
-            time.sleep(0.5)
+            actions = ActionChains(driver)
             recipients = "seokhoon.byun.ext@valeo.com, jeongil.sun@valeo.com"
-            to_field.send_keys(recipients)
-            to_field.send_keys(Keys.ENTER)
+            actions.send_keys(recipients)
+            actions.send_keys(Keys.ENTER)
+            actions.perform()
             time.sleep(1)
 
-            # 3. 제목(Subject) 입력
+            # 🚨 수신자 자동완성 팝업 강제 닫기 (ESC 입력)
+            actions = ActionChains(driver)
+            actions.send_keys(Keys.ESCAPE)
+            actions.perform()
+            time.sleep(0.5)
+
+            # 3. 제목(Subject) 입력 (JS 및 일반 클릭 이중 적용)
             print("📝 제목 입력 중...")
             subject_field = driver.find_element(By.NAME, "subjectbox")
-            subject_field.send_keys(f"[자동발송] Bpack PO 정제 리포트 ({now_str})")
+            # 가림막 무시를 위해 JavaScript로 먼저 포커스 및 값 주입 후 입력
+            driver.execute_script("arguments[0].focus(); arguments[0].value = arguments[1];", subject_field, f"[자동발송] PO 리포트 ({now_str})")
             time.sleep(1)
 
             # 4. 본문(Body) 입력
             print("📄 본문 내용 작성 중...")
             body_field = driver.find_element(By.XPATH, "//div[@role='textbox']")
-            body_field.click()
-            body_text = "안녕하세요,\n\nBpack 포털에서 자동으로 추출 및 정제된 PO 리포트 파일(CSV)을 첨부하여 보내드립니다.\n\n감사합니다."
-            body_field.send_keys(body_text)
+            body_text = "안녕하세요,\n\nPO 리포트 파일(CSV)을 첨부하여 보내드립니다.\n\n감사합니다."
+            driver.execute_script("arguments[0].innerText = arguments[1];", body_field, body_text)
             time.sleep(1)
 
-            # 5. 파일 첨부 (input[type='file']에 직접 파일 전달)
+            # 5. 정제 CSV 파일 첨부
             print("📎 정제 CSV 파일 첨부 중...")
-            file_input = driver.find_element(By.XPATH, "//input[@type='file' and @name='file']")
+            file_input = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
+            )
             file_input.send_keys(abs_sorted_filepath)
             
-            # 업로드 진행 대기 (4초)
-            time.sleep(4)
+            print("⏳ 파일 업로드 진행 중 (5초 대기)...")
+            time.sleep(5)
 
-            # 6. '보내기' 버튼 클릭 (Ctrl + Enter 또는 보내기 버튼)
-            print("🚀 메일 '보내기' 실행 중...")
+            # 6. 파란색 'Send' (보내기) 버튼 클릭
+            print("🚀 메일 '보내기(Send)' 버튼 클릭 중...")
             try:
-                # Gmail 작성 창에서 Ctrl + Enter는 메일 즉시 발송 단축키입니다.
-                body_field.send_keys(Keys.CONTROL, Keys.ENTER)
+                send_btn = driver.find_element(By.CSS_SELECTOR, "div.aoO")
+                driver.execute_script("arguments[0].click();", send_btn)
             except Exception:
-                send_btn = driver.find_element(By.XPATH, "//div[@role='button' and (text()='보내기' or text()='Send' or @data-tooltip*='Send')]")
-                send_btn.click()
+                send_btn = driver.find_element(By.XPATH, "//div[@role='button' and (text()='Send' or text()='보내기' or contains(@aria-label, 'Send') or contains(@aria-label, '보내기'))]")
+                driver.execute_script("arguments[0].click();", send_btn)
             
             time.sleep(5)
-            print("🎉 성공적으로 웹 Gmail을 통해 메일을 발송했습니다!")
+            print("🎉 성공적으로 웹 Gmail을 통해 메일을 최종 발송했습니다!")
 
         except Exception as e:
             print(f"❌ 13단계 웹 이메일 발송 실패: {e}")
